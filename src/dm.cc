@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstring>
 
+#include "bsp/time.h"
 #include "utils/logger.h"
 
 using namespace motor;
@@ -59,8 +60,6 @@ void dm::control(float position, float speed, float Kp, float Kd, float torque) 
     BSP_ASSERT(param.mode == MIT);
     BSP_ASSERT(Kp == 0 or Kd != 0); // 根据 MIT 模式说明，若 Kp != 0 且 Kd == 0，会引起震荡。
 
-    if (!enabled) return;
-
     position = std::clamp(position, -param.p_max, param.p_max);
     speed = std::clamp(speed, -param.v_max, param.v_max);
     Kp = std::clamp(Kp, 0.f, 500.f);
@@ -87,7 +86,6 @@ void dm::control(float position, float speed, float Kp, float Kd, float torque) 
 
 void dm::control(float position, float speed) const {
     BSP_ASSERT(param.mode == POSITION_SPEED);
-    if (!enabled) return;
     position = std::clamp(position, -param.p_max, param.p_max);
     speed = std::clamp(speed, -param.v_max, param.v_max);
     const float f[] = { position, speed };
@@ -97,7 +95,6 @@ void dm::control(float position, float speed) const {
 
 void dm::control(float speed) const {
     BSP_ASSERT(param.mode == SPEED);
-    if (!enabled) return;
     speed = std::clamp(speed, -param.v_max, param.v_max);
     static_assert(sizeof speed == 4);
     bsp_can_send(param.port, ctrl_id, reinterpret_cast<uint8_t *>(&speed), sizeof speed);
@@ -133,6 +130,8 @@ void dm::decoder(bsp_can_e device, uint32_t id, const uint8_t* data, size_t len)
     fb.err = raw.err;
     fb.temp_mos = raw.temp_mos;
     fb.temp_rotor = raw.temp_rotor;
+
+    fb.timestamp = bsp_time_get_ms();
 }
 
 void dm::init() {

@@ -59,7 +59,6 @@ namespace motor {
         [[nodiscard]] const param_t *get_param() const { return &param; }
 
         char name[16] = { };
-        bool enabled = false;
         uint16_t ctrl_id, feedback_id;
         feedback_t feedback = feedback_t();
     private:
