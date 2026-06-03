@@ -8,6 +8,7 @@
 
 #include <cstring>
 #include <cmath>
+#include <cstdio>
 
 #include "cmsis_os2.h"
 
@@ -35,7 +36,11 @@ static bool ctrl_id_used[BSP_CAN_DEVICE_COUNT][ID_COUNT + 1];
 static uint8_t can_tx_buf[BSP_CAN_DEVICE_COUNT][ID_COUNT + 1][8];
 
 gyj::gyj(const char *name, const param_t &param, float ratio) : ratio(ratio), param(param) {
-    strcpy(this->name, name);
+    BSP_ASSERT(ratio > 0.f);
+    BSP_ASSERT(0 <= param.port and param.port < BSP_CAN_DEVICE_COUNT);
+    BSP_ASSERT(param.id < GYJ_MOTOR_LIMIT);
+    BSP_ASSERT(device_cnt[param.port] < GYJ_MOTOR_LIMIT);
+    std::snprintf(this->name, sizeof(this->name), "%s", name != nullptr ? name : "");
 
     ctrl_id = param.id < 4 ? 0xaf : 0xae;
     feedback_id = 0xf0 + param.id;
@@ -99,7 +104,7 @@ void gyj::decoder(bsp_can_e device, uint32_t id, const uint8_t *data, size_t len
 void gyj::init() {
     logger::info("motor '%s' inited", name);
     if (!inited) {
-        xTaskCreate(
+        const BaseType_t ok = xTaskCreate(
             task,
             "motor::gyj",
             TASK_STACK_SIZE,
@@ -107,6 +112,7 @@ void gyj::init() {
             osPriorityHigh,
             &task_handle
         );
+        BSP_ASSERT(ok == pdPASS);
         inited = true;
     }
     bsp_can_set_callback(param.port, feedback_id, decoder);

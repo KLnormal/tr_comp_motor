@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <cstdio>
 
 #include "bsp/time.h"
 #include "utils/logger.h"
@@ -17,7 +18,8 @@ const uint8_t disable_cmd[] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfd }
 
 dm::dm(const char *name_, const param_t &param_) : param(param_) {
     BSP_ASSERT(0 <= param_.port and param_.port < BSP_CAN_DEVICE_COUNT);
-    strcpy(name, name_);
+    BSP_ASSERT(device_cnt[param_.port] < DM_MOTOR_LIMIT);
+    std::snprintf(name, sizeof(name), "%s", name_ != nullptr ? name_ : "");
 
     if (param_.mode == MIT) {
         ctrl_id = param_.slave_id;

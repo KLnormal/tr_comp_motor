@@ -9,6 +9,7 @@
 #include <cstring>
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 
 #include "cmsis_os2.h"
 
@@ -107,7 +108,9 @@ dji(name, model, param, timeout_ms, ratio, model == GM6020 ? GM6020_DEFAULT_POWE
 
 dji::dji(const char *name, const model_e &model, const param_t &param, int timeout_ms, float ratio, const power_param_t &power_param) : ratio(ratio), power_param(power_param), timeout_ms(timeout_ms), model(model), param(param) {
     BSP_ASSERT(ratio > 0.f);
-    strcpy(this->name, name);
+    BSP_ASSERT(0 <= param.port and param.port < BSP_CAN_DEVICE_COUNT);
+    BSP_ASSERT(device_cnt[param.port] < DJI_MOTOR_LIMIT);
+    std::snprintf(this->name, sizeof(this->name), "%s", name != nullptr ? name : "");
 
     switch (model) {
         case GM6020: {
@@ -168,6 +171,7 @@ void dji::update(float val) {
             break;
         }
     }
+    lst_update_time = bsp_time_get_ms();
     uint8_t cid = id_trans(ctrl_id), mid = param.id < 5 ? param.id : param.id - 4;
     can_tx_buf[param.port][cid][(mid - 1) << 1] = output >> 8;
     can_tx_buf[param.port][cid][(mid - 1) << 1 | 1] = output & 0xff;
@@ -245,7 +249,7 @@ void dji::decoder(bsp_can_e device, uint32_t id, const uint8_t *data, size_t len
 void dji::init() {
     logger::info("motor '%s' inited", name);
     if (!inited) {
-        xTaskCreate(
+        const BaseType_t ok = xTaskCreate(
             task,
             "motor::dji",
             TASK_STACK_SIZE,
@@ -253,6 +257,7 @@ void dji::init() {
             osPriorityHigh,
             &task_handle
         );
+        BSP_ASSERT(ok == pdPASS);
         inited = true;
     }
     bsp_can_set_callback(param.port, feedback_id, decoder);
@@ -268,8 +273,9 @@ static void task(void *args) {
             for (uint8_t j = 0; j < device_cnt[i]; j++) {
                 if (device_ptr[i][j]->timeout_ms == -1) continue;
                 const auto p = device_ptr[i][j];
+                const auto timeout_ms = static_cast<uint32_t>(p->timeout_ms);
                 if (const auto cur_ms = bsp_time_get_ms(); p->output != 0 and
-                    (cur_ms - p->feedback.timestamp > static_cast<uint32_t>(p->timeout_ms) or cur_ms - p->lst_update_time)) {
+                    (cur_ms - p->feedback.timestamp > timeout_ms or cur_ms - p->lst_update_time > timeout_ms)) {
                     p->update(0);
                 }
             }
