@@ -112,5 +112,10 @@ namespace motor {
         param_t param {};
         uint16_t lst_angle = 0;
         bool feedback_received = false;
+
+        static constexpr uint16_t encoder_resolution = 8192;
+        static constexpr float two_pi = 6.28318530717958647692f;
+
+        void update_round(uint16_t raw_angle);
     };
 }

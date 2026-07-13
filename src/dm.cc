@@ -10,8 +10,10 @@
 
 using namespace motor;
 
-static dm* device_ptr[BSP_CAN_DEVICE_COUNT][DM_MOTOR_LIMIT];
-static uint8_t device_cnt[BSP_CAN_DEVICE_COUNT];
+
+#include "device_registry.h"
+
+static internal::device_registry<dm, DM_MOTOR_LIMIT> registry;
 
 static const uint8_t reset_cmd[] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfb };
 static const uint8_t enable_cmd[] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfc };
@@ -24,7 +26,6 @@ dm::dm(const char *name_, const param_t &param_) : param(param_) {
         param_.v_max > 0.f && param_.t_max > 0.f
     );
     BSP_ASSERT(0 <= param_.port and param_.port < BSP_CAN_DEVICE_COUNT);
-    BSP_ASSERT(device_cnt[param_.port] < DM_MOTOR_LIMIT);
     std::snprintf(name, sizeof(name), "%s", name_ != nullptr ? name_ : "");
 
     if (param_.mode == MIT) {
@@ -38,7 +39,7 @@ dm::dm(const char *name_, const param_t &param_) : param(param_) {
     }
 
     feedback_id = param_.master_id;
-    device_ptr[param.port][device_cnt[param.port] ++] = this;
+    registry.add(param.port, this);
 }
 
 void dm::reset() const {
@@ -122,19 +123,10 @@ void dm::control(float speed) const {
 }
 
 void dm::decoder(bsp_can_e device, uint32_t id, const uint8_t* data, size_t len) {
-    const int device_index = static_cast<int>(device);
-    if (device_index < 0 || device_index >= BSP_CAN_DEVICE_COUNT ||
-        !device_cnt[device] || data == nullptr || len != 8) return;
+    if (!data || len != 8) return;
 
-    dm *p = nullptr;
-    for (uint8_t i = 0; i < device_cnt[device]; i++) {
-        if (device_ptr[device][i]->feedback_id == id) {
-            p = device_ptr[device][i];
-            break;
-        }
-    }
-
-    if (p == nullptr) return;
+    dm* p = registry.find_by_feedback_id(device, static_cast<uint16_t>(id));
+    if (!p) return;
 
     const auto s = data;
     feedback_t next{};
@@ -159,7 +151,6 @@ void dm::decoder(bsp_can_e device, uint32_t id, const uint8_t* data, size_t len)
     p->feedback = next;
     bsp_sys_exit_critical(state);
 }
-
 void dm::init() {
     logger::info("motor '%s' inited", name);
     bsp_can_set_callback(param.port, feedback_id, decoder);
