@@ -56,6 +56,8 @@ namespace motor {
         // Speed Control
         void control(float speed) const;
 
+        [[nodiscard]] feedback_t state() const;
+
         [[nodiscard]] const param_t *get_param() const { return &param; }
 
         char name[16] = { };

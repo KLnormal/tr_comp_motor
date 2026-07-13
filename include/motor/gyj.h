@@ -58,6 +58,7 @@ namespace motor {
         void enable() { set_mode(this->param.mode, this->param.have_feedback, false); this->enabled = true; }
         void disable() { set_mode(DISABLE, false, false); clear(); this->enabled = false; }
         void update(float val);
+        [[nodiscard]] feedback_t state() const;
 
         float ratio = 0;
         char name[16] = { };
@@ -68,6 +69,5 @@ namespace motor {
         int16_t output = 0;
     private:
         param_t param {};
-        int16_t lst_angle = 0;
     };
 }

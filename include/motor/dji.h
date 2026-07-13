@@ -57,12 +57,13 @@ namespace motor {
         struct feedback_t {
             // 电机原始反馈值
             struct {
-                int16_t angle, speed, current;
+                uint16_t angle;
+                int16_t speed, current;
                 uint8_t temp;
             } raw;
-            // 输出轴总圈数
-            int round;
-            // 输出轴单圈角度 (rad, [0, 2\pi))
+            // 编码器轴累计圈数，首帧为 0；原始角度正向过零时加 1
+            int32_t round;
+            // 编码器轴单圈绝对角度 (rad, [0, 2\pi))
             float angle;
             // 输出轴角速度 (rad/s)
             float speed;
@@ -94,6 +95,7 @@ namespace motor {
         // void update_torque(float val);
 
         [[nodiscard]] float predict_power(float val) const;
+        [[nodiscard]] feedback_t state() const;
 
         float ratio = 0;
         char name[16] = { };
@@ -108,6 +110,7 @@ namespace motor {
     private:
         model_e model {};
         param_t param {};
-        int16_t lst_angle = 0;
+        uint16_t lst_angle = 0;
+        bool feedback_received = false;
     };
 }

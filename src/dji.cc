@@ -1,12 +1,13 @@
 #include "motor/dji.h"
 
+#include "dji_angle.h"
 #include "bsp/can.h"
+#include "bsp/sys.h"
 #include "bsp/time.h"
 #include "utils/logger.h"
 
 #include "task.h"
 
-#include <cstring>
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -70,7 +71,7 @@ constexpr dji::power_param_t M2006_DEFAULT_POWER_PARAM = {
     .k5 = 0
 };
 
-const float fpi = M_PI;
+
 
 // FreeRTOS Task
 static bool inited = false;
@@ -82,20 +83,12 @@ static TaskHandle_t task_handle = nullptr;
 static constexpr uint16_t ctrl_id_map[] = { 0x2ff, 0x1ff, 0x2fe, 0x1fe, 0x200 };
 static uint8_t id_trans(uint16_t x) {
     for(uint8_t i = 0; i < ID_COUNT; i++) if(ctrl_id_map[i] == x) return i;
-    BSP_ASSERT(false); return 0;
+    return 0;
 }
 static dji* device_ptr[BSP_CAN_DEVICE_COUNT][DJI_MOTOR_LIMIT];
 static uint8_t device_cnt[BSP_CAN_DEVICE_COUNT];
 static bool ctrl_id_used[BSP_CAN_DEVICE_COUNT][ID_COUNT + 1];
 static uint8_t can_tx_buf[BSP_CAN_DEVICE_COUNT][ID_COUNT + 1][8];
-
-// 带过零的计算角度差，好用
-static float calc_delta(float full, float current, float target) {
-    float dt = target - current;
-    if(2 * dt >  full) dt -= full;
-    if(2 * dt < -full) dt += full;
-    return dt;
-}
 
 dji::dji(const char *name, const model_e &model, const param_t &param) :
 dji(name, model, param, -1) {}
@@ -107,7 +100,12 @@ dji::dji(const char *name, const model_e &model, const param_t &param, int timeo
 dji(name, model, param, timeout_ms, ratio, model == GM6020 ? GM6020_DEFAULT_POWER_PARAM : model == M3508 ? M3508_DEFAULT_POWER_PARAM : M2006_DEFAULT_POWER_PARAM) {}
 
 dji::dji(const char *name, const model_e &model, const param_t &param, int timeout_ms, float ratio, const power_param_t &power_param) : ratio(ratio), power_param(power_param), timeout_ms(timeout_ms), model(model), param(param) {
-    BSP_ASSERT(ratio > 0.f);
+    BSP_ASSERT(std::isfinite(ratio) && ratio > 0.f && timeout_ms >= -1);
+    BSP_ASSERT(
+        std::isfinite(power_param.k0) && std::isfinite(power_param.k1) &&
+        std::isfinite(power_param.k2) && std::isfinite(power_param.k3) &&
+        std::isfinite(power_param.k4) && std::isfinite(power_param.k5)
+    );
     BSP_ASSERT(0 <= param.port and param.port < BSP_CAN_DEVICE_COUNT);
     BSP_ASSERT(device_cnt[param.port] < DJI_MOTOR_LIMIT);
     std::snprintf(this->name, sizeof(this->name), "%s", name != nullptr ? name : "");
@@ -115,6 +113,7 @@ dji::dji(const char *name, const model_e &model, const param_t &param, int timeo
     switch (model) {
         case GM6020: {
             BSP_ASSERT(1 <= param.id and param.id <= 7);
+            BSP_ASSERT(param.mode == VOLTAGE || param.mode == CURRENT);
             if (param.mode == VOLTAGE) {
                 ctrl_id = param.id < 5 ? 0x1ff : 0x2ff;
             }
@@ -146,35 +145,41 @@ dji::dji(const char *name, const model_e &model, const param_t &param, int timeo
 
 void dji::update(float val) {
     if (!enabled) return;
+    // 控制链路的运行时异常不能让整机停在断言中，非有限输入按零输出处理。
+    if (!std::isfinite(val)) val = 0.0f;
+    int16_t next_output = 0;
     switch (model) {
         case GM6020: {
             if (param.mode == VOLTAGE)
-                output = static_cast<int16_t>(
+                next_output = static_cast<int16_t>(
                     std::clamp(val, -GM6020_VOLTAGE_LIMIT, GM6020_VOLTAGE_LIMIT)
                 );
             else
-                output = static_cast<int16_t>(
+                next_output = static_cast<int16_t>(
                     std::clamp(val, -GM6020_CURRENT_LIMIT, GM6020_CURRENT_LIMIT)
                 );
             break;
         }
         case M3508: {
-            output = static_cast<int16_t>(
+            next_output = static_cast<int16_t>(
                 std::clamp(val, -M3508_CURRENT_LIMIT, M3508_CURRENT_LIMIT)
             );
             break;
         }
         case M2006: {
-            output = static_cast<int16_t>(
+            next_output = static_cast<int16_t>(
                 std::clamp(val, -M2006_CURRENT_LIMIT, M2006_CURRENT_LIMIT)
             );
             break;
         }
     }
-    lst_update_time = bsp_time_get_ms();
     uint8_t cid = id_trans(ctrl_id), mid = param.id < 5 ? param.id : param.id - 4;
+    const unsigned long state = bsp_sys_enter_critical();
+    output = next_output;
+    lst_update_time = bsp_time_get_ms();
     can_tx_buf[param.port][cid][(mid - 1) << 1] = output >> 8;
     can_tx_buf[param.port][cid][(mid - 1) << 1 | 1] = output & 0xff;
+    bsp_sys_exit_critical(state);
 }
 
 // void dji::update_torque(float val) {
@@ -182,8 +187,20 @@ void dji::update(float val) {
 // }
 
 void dji::clear() {
-    update(0);
-    memset(&feedback, 0, sizeof feedback);
+    const uint8_t cid = id_trans(ctrl_id);
+    const uint8_t mid = param.id < 5 ? param.id : param.id - 4;
+    const unsigned long state = bsp_sys_enter_critical();
+    output = 0;
+    can_tx_buf[param.port][cid][(mid - 1) << 1] = 0;
+    can_tx_buf[param.port][cid][((mid - 1) << 1) | 1] = 0;
+    const auto absolute_angle = feedback.raw.angle;
+    const auto angle = feedback.angle;
+    feedback = feedback_t {};
+    feedback.raw.angle = absolute_angle;
+    feedback.angle = angle;
+    lst_angle = absolute_angle;
+    internal::dji_clear_round(feedback_received, feedback.round);
+    bsp_sys_exit_critical(state);
 }
 
 // speed 为 raw, 但 current 不是
@@ -197,11 +214,20 @@ static float calc_power(float k0, float k1, float k2, float k3, float k4, float 
 // 不妨考虑速度不突变, 假设控制量为 val, 估计功率
 float dji::predict_power(float val) const {
     auto [k0, k1, k2, k3, k4, k5] = power_param;
-    return calc_power(k0, k1, k2, k3, k4, k5, val, feedback.raw.speed);
+    return calc_power(k0, k1, k2, k3, k4, k5, val, state().raw.speed);
+}
+
+dji::feedback_t dji::state() const {
+    const unsigned long state = bsp_sys_enter_critical();
+    const feedback_t copy = feedback;
+    bsp_sys_exit_critical(state);
+    return copy;
 }
 
 void dji::decoder(bsp_can_e device, uint32_t id, const uint8_t *data, size_t len) {
-    if (!device_cnt[device] or len != 8) return;
+    const int device_index = static_cast<int>(device);
+    if (device_index < 0 || device_index >= BSP_CAN_DEVICE_COUNT ||
+        !device_cnt[device] || data == nullptr || len != 8) return;
 
     dji *p = nullptr;
     for(uint8_t i = 0; i < device_cnt[device]; i++) {
@@ -212,18 +238,22 @@ void dji::decoder(bsp_can_e device, uint32_t id, const uint8_t *data, size_t len
     }
     if(p == nullptr) return;
 
-    auto &fb = p->feedback;
+    const uint16_t raw_angle = static_cast<uint16_t>(data[0] << 8 | data[1]);
 
-    fb.raw.angle = static_cast<int16_t>(data[0] << 8 | data[1]);
+    const unsigned long state = bsp_sys_enter_critical();
+    auto &fb = p->feedback;
+    if (!internal::dji_update_round(raw_angle, p->lst_angle, p->feedback_received, fb.round)) {
+        bsp_sys_exit_critical(state);
+        return;
+    }
+    fb.raw.angle = raw_angle;
     fb.raw.speed = static_cast<int16_t>(data[2] << 8 | data[3]);
     fb.raw.current = static_cast<int16_t>(data[4] << 8 | data[5]);
     fb.raw.temp = data[6];
 
-    // angle - rad
-    fb.angle += calc_delta(8192, p->lst_angle, fb.raw.angle) / 4096.f * fpi / p->ratio;
-    if (fb.angle < 0) fb.angle += 2 * fpi, fb.round --;
-    if (fb.angle >= 2 * fpi) fb.angle -= 2 * fpi, fb.round ++;
-    p->lst_angle = fb.raw.angle;
+    // angle 始终反映编码器轴单圈绝对值；round 仅记录启动后检测到的过零圈数。
+    fb.angle = internal::dji_encoder_to_angle(fb.raw.angle);
+
     // speed - rad/s
     fb.speed = static_cast<float>(fb.raw.speed) / 30.f * static_cast<float>(M_PI) / p->ratio;
     // current - A, torque - Nm
@@ -242,8 +272,10 @@ void dji::decoder(bsp_can_e device, uint32_t id, const uint8_t *data, size_t len
             break;
     }
     // power - W
-    fb.power = p->predict_power(fb.raw.current);
+    const auto [k0, k1, k2, k3, k4, k5] = p->power_param;
+    fb.power = calc_power(k0, k1, k2, k3, k4, k5, fb.raw.current, fb.raw.speed);
     fb.timestamp = bsp_time_get_ms();
+    bsp_sys_exit_critical(state);
 }
 
 void dji::init() {
@@ -274,8 +306,13 @@ static void task(void *args) {
                 if (device_ptr[i][j]->timeout_ms == -1) continue;
                 const auto p = device_ptr[i][j];
                 const auto timeout_ms = static_cast<uint32_t>(p->timeout_ms);
-                if (const auto cur_ms = bsp_time_get_ms(); p->output != 0 and
-                    (cur_ms - p->feedback.timestamp > timeout_ms or cur_ms - p->lst_update_time > timeout_ms)) {
+                const unsigned long state = bsp_sys_enter_critical();
+                const int16_t output = p->output;
+                const uint32_t feedback_time = p->feedback.timestamp;
+                const uint32_t update_time = p->lst_update_time;
+                bsp_sys_exit_critical(state);
+                if (const auto cur_ms = bsp_time_get_ms(); output != 0 and
+                    (cur_ms - feedback_time > timeout_ms or cur_ms - update_time > timeout_ms)) {
                     p->update(0);
                 }
             }

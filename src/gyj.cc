@@ -1,12 +1,13 @@
 #include "motor/gyj.h"
 
 #include "bsp/can.h"
+#include "bsp/sys.h"
 #include "bsp/time.h"
 #include "utils/logger.h"
 
 #include "task.h"
 
-#include <cstring>
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 
@@ -28,7 +29,7 @@ static TaskHandle_t task_handle = nullptr;
 static constexpr uint16_t ctrl_id_map[] = { 0xaf, 0xae };
 static uint8_t id_trans(uint16_t x) {
     for(uint8_t i = 0; i < ID_COUNT; i++) if(ctrl_id_map[i] == x) return i;
-    BSP_ASSERT(false); return 0;
+    return 0;
 }
 static gyj* device_ptr[BSP_CAN_DEVICE_COUNT][GYJ_MOTOR_LIMIT];
 static uint8_t device_cnt[BSP_CAN_DEVICE_COUNT];
@@ -51,15 +52,33 @@ gyj::gyj(const char *name, const param_t &param, float ratio) : ratio(ratio), pa
 
 void gyj::update(float val) {
     if (!enabled) return;
-    output = static_cast <int16_t> (val);
+    // 控制链路的运行时异常不能让整机停在断言中，非有限输入按零输出处理。
+    if (!std::isfinite(val)) val = 0.0f;
+    const auto next_output = static_cast<int16_t>(std::clamp(val, -32768.0f, 32767.0f));
     uint8_t cid = id_trans(ctrl_id), mid = param.id < 4 ? param.id : param.id - 4;
+    const unsigned long state = bsp_sys_enter_critical();
+    output = next_output;
     can_tx_buf[param.port][cid][mid << 1] = output >> 8;
     can_tx_buf[param.port][cid][mid << 1 | 1] = output & 0xff;
+    bsp_sys_exit_critical(state);
 }
 
 void gyj::clear() {
-    update(0);
-    memset(&feedback, 0, sizeof feedback);
+    const uint8_t cid = id_trans(ctrl_id);
+    const uint8_t mid = param.id < 4 ? param.id : param.id - 4;
+    const unsigned long state = bsp_sys_enter_critical();
+    output = 0;
+    can_tx_buf[param.port][cid][mid << 1] = 0;
+    can_tx_buf[param.port][cid][(mid << 1) | 1] = 0;
+    feedback = feedback_t {};
+    bsp_sys_exit_critical(state);
+}
+
+gyj::feedback_t gyj::state() const {
+    const unsigned long state = bsp_sys_enter_critical();
+    const feedback_t copy = feedback;
+    bsp_sys_exit_critical(state);
+    return copy;
 }
 
 static uint8_t mode_data[BSP_CAN_DEVICE_COUNT][8];
@@ -68,13 +87,19 @@ void gyj::set_mode(mode_e m, bool have_feedback, bool modified) {
     if (modified) {
         this->param.mode = m, this->param.have_feedback = have_feedback;
     }
-    mode_data[this->param.port][this->param.id] = ((this->param.have_feedback << 3) & 0x08) | (this->param.mode & 0x07);
-    bsp_can_send(this->param.port, 0x0a, mode_data[this->param.port], 8);
+    uint8_t data[8];
+    const unsigned long state = bsp_sys_enter_critical();
+    mode_data[this->param.port][this->param.id] = ((have_feedback << 3) & 0x08) | (m & 0x07);
+    std::copy_n(mode_data[this->param.port], 8, data);
+    bsp_sys_exit_critical(state);
+    bsp_can_send(this->param.port, 0x0a, data, 8);
 }
 
 
 void gyj::decoder(bsp_can_e device, uint32_t id, const uint8_t *data, size_t len) {
-    if (!device_cnt[device] or len != 8) return;
+    const int device_index = static_cast<int>(device);
+    if (device_index < 0 || device_index >= BSP_CAN_DEVICE_COUNT ||
+        !device_cnt[device] || data == nullptr || len != 8) return;
 
     gyj *p = nullptr;
     for(uint8_t i = 0; i < device_cnt[device]; i++) {
@@ -85,20 +110,24 @@ void gyj::decoder(bsp_can_e device, uint32_t id, const uint8_t *data, size_t len
     }
     if(p == nullptr or !p->enabled) return;
 
-    auto &fb = p->feedback;
+    // CAN 数据来自外设，错误 ID 只丢弃该帧，不能按程序不变量处理。
+    if (data[0] >> 4 != p->param.id) return;
 
-    if (data[0]>>4 != p->param.id) BSP_ASSERT(false);
-
-    fb.raw.current = static_cast<int16_t>(data[1] << 8 | data[2]);
-    fb.raw.speed = static_cast<int16_t>(data[3] << 8 | data[4]);
-    fb.raw.angle = static_cast<int16_t>(data[5] << 8 | data[6]);
-    fb.raw.temp = data[7];
+    feedback_t next{};
+    next.raw.current = static_cast<int16_t>(data[1] << 8 | data[2]);
+    next.raw.speed = static_cast<int16_t>(data[3] << 8 | data[4]);
+    next.raw.angle = static_cast<int16_t>(data[5] << 8 | data[6]);
+    next.raw.temp = data[7];
 
     // 暂时不知道原始数据是什么单位，先直接赋值
-    fb.angle = fb.raw.angle;
-    fb.speed = fb.raw.speed;
-    fb.current = fb.raw.current;
-    fb.timestamp = bsp_time_get_ms();
+    next.angle = next.raw.angle;
+    next.speed = next.raw.speed;
+    next.current = next.raw.current;
+    next.timestamp = bsp_time_get_ms();
+
+    const unsigned long state = bsp_sys_enter_critical();
+    p->feedback = next;
+    bsp_sys_exit_critical(state);
 }
 
 void gyj::init() {
