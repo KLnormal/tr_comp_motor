@@ -197,6 +197,22 @@ void robstride::control(
     );
 }
 
+void robstride::motion_velocity_control(float velocity, float kd) const {
+    control(0.f, velocity, 0.f, kd, 0.f);
+}
+
+void robstride::motion_damping_control(float kd) const {
+    control(0.f, 0.f, 0.f, kd, 0.f);
+}
+
+void robstride::motion_position_control(
+    float position,
+    float kp,
+    float kd
+) const {
+    control(position, 0.f, kp, kd, 0.f);
+}
+
 void robstride::write_float(uint16_t index, float value) const {
     static_assert(sizeof(float) == sizeof(uint32_t));
     static_assert(std::numeric_limits<float>::is_iec559);

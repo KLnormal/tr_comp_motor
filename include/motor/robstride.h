@@ -77,6 +77,13 @@ namespace motor {
             float kd,
             float torque
         ) const;
+        void motion_velocity_control(float velocity, float kd) const;
+        void motion_damping_control(float kd) const;
+        void motion_position_control(
+            float position,
+            float kp,
+            float kd
+        ) const;
         // SPEED 模式下单位为 rad/s，POSITION 模式下单位为 rad
         void control(float target) const;
 
