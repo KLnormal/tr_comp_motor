@@ -26,6 +26,7 @@ dm::dm(const char *name_, const param_t &param_) : param(param_) {
         param_.v_max > 0.f && param_.t_max > 0.f
     );
     BSP_ASSERT(0 <= param_.port and param_.port < BSP_CAN_DEVICE_COUNT);
+    BSP_ASSERT(param_.slave_id <= 0x0Fu && "DM slave_id must be 0x00-0x0F: bits 4-7 overlap ERR in feedback byte D[0]");
     std::snprintf(name, sizeof(name), "%s", name_ != nullptr ? name_ : "");
 
     if (param_.mode == MIT) {
